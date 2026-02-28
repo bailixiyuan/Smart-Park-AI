@@ -1,14 +1,32 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { AiAnalysisResult } from "../types";
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+let ai: GoogleGenAI | null = null;
+
+const getAiClient = () => {
+  if (!ai) {
+    const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      console.warn("Gemini API Key is missing. AI features will not work.");
+      // Return a dummy object or throw, but better to just return null and handle it
+      return null;
+    }
+    ai = new GoogleGenAI({ apiKey });
+  }
+  return ai;
+};
 
 export const analyzeParkingPhoto = async (base64Image: string): Promise<AiAnalysisResult> => {
   try {
+    const client = getAiClient();
+    if (!client) {
+      throw new Error("Gemini API Key is not configured.");
+    }
+
     // We strip the data url prefix if present to get raw base64
     const base64Data = base64Image.replace(/^data:image\/(png|jpeg|jpg|webp);base64,/, "");
     
-    const response = await ai.models.generateContent({
+    const response = await client.models.generateContent({
       model: 'gemini-2.5-flash-image',
       contents: {
         parts: [
