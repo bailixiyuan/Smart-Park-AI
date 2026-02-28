@@ -21,6 +21,7 @@ const App: React.FC = () => {
   const [tempPhoto, setTempPhoto] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [locatingStatus, setLocatingStatus] = useState<string>("正在初始化定位...");
+  const [analyzingStatus, setAnalyzingStatus] = useState<string>("准备分析..."); // New state
   const [debugLogs, setDebugLogs] = useState<string[]>([]); // Added state for debug logs
 
   // Detail View Specific State (Timer, Edit Mode)
@@ -259,12 +260,14 @@ const App: React.FC = () => {
       clearTimeout(watchdogId);
 
       if (!isLocatingRef.current) return;
-      isLocatingRef.current = false;
 
       // Ensure we have a position before proceeding
       if (!position) {
+        // Do NOT set isLocatingRef.current = false here, let the catch block handle it
         throw new Error("无法获取位置信息");
       }
+
+      isLocatingRef.current = false;
 
       const coords: GeoLocation = {
         latitude: position.coords.latitude,
@@ -347,33 +350,87 @@ const App: React.FC = () => {
 
     if (!tempRecord) return;
     
+    // Reset logs for analysis phase
+    setDebugLogs([]);
+    addDebugLog(`Photo selected: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`);
+    setAnalyzingStatus("正在读取照片...");
+    setViewMode('ANALYZING');
+    
     processAndSavePhoto(file, tempRecord);
   };
   
   const processAndSavePhoto = (file: File, record: ParkingLocation) => {
-    const reader = new FileReader();
-    reader.onloadend = async () => {
-      const base64String = reader.result as string;
-      setTempPhoto(base64String);
-      setViewMode('ANALYZING');
-
-      const analysis = await analyzeParkingPhoto(base64String);
+    try {
+      const reader = new FileReader();
       
-      const newRecord: ParkingLocation = {
-        ...record,
-        photoBase64: base64String,
-        floor: analysis.floor || undefined,
-        spotNumber: analysis.spotNumber || undefined,
-        aiAnalysis: analysis.description || undefined,
-        notes: analysis.description || undefined,
-        locationName: record.locationName || "停车位置"
+      reader.onerror = (e) => {
+        addDebugLog(`Error reading file: ${reader.error?.message}`);
+        setAnalyzingStatus("读取照片失败");
       };
 
-      const newList = addOrUpdateParkingRecord(newRecord);
-      setParkingList(newList);
-      activateRecord(newRecord);
-    };
-    reader.readAsDataURL(file);
+      reader.onloadstart = () => {
+        addDebugLog("Started reading file...");
+      };
+
+      reader.onloadend = async () => {
+        if (reader.error) {
+           addDebugLog("Read failed.");
+           return;
+        }
+        
+        const base64String = reader.result as string;
+        addDebugLog(`Read complete. Base64 length: ${base64String.length}`);
+        
+        setTempPhoto(base64String);
+        setAnalyzingStatus("正在分析照片 (Gemini AI)...");
+        addDebugLog("Sending to Gemini API...");
+
+        try {
+          // Add a timeout for the AI analysis
+          const analysisPromise = analyzeParkingPhoto(base64String);
+          const timeoutPromise = new Promise<any>((_, reject) => 
+            setTimeout(() => reject(new Error("Analysis timeout")), 15000)
+          );
+          
+          const analysis = await Promise.race([analysisPromise, timeoutPromise]);
+          
+          addDebugLog("Analysis complete.");
+          
+          const newRecord: ParkingLocation = {
+            ...record,
+            photoBase64: base64String,
+            floor: analysis.floor || undefined,
+            spotNumber: analysis.spotNumber || undefined,
+            aiAnalysis: analysis.description || undefined,
+            notes: analysis.description || undefined,
+            locationName: record.locationName || "停车位置"
+          };
+
+          const newList = addOrUpdateParkingRecord(newRecord);
+          setParkingList(newList);
+          activateRecord(newRecord);
+        } catch (err: any) {
+          addDebugLog(`Analysis error: ${err.message}`);
+          setAnalyzingStatus("分析失败，保存原始记录...");
+          
+          // Fallback: save without analysis
+          const newRecord: ParkingLocation = {
+            ...record,
+            photoBase64: base64String,
+            locationName: record.locationName || "停车位置"
+          };
+          const newList = addOrUpdateParkingRecord(newRecord);
+          setParkingList(newList);
+          
+          // Delay slightly so user sees the error
+          setTimeout(() => activateRecord(newRecord), 1500);
+        }
+      };
+      reader.readAsDataURL(file);
+    } catch (e: any) {
+      addDebugLog(`Process error: ${e.message}`);
+      setAnalyzingStatus("处理照片出错");
+    }
   };
 
   // --- Handlers: Detail View Updates ---
@@ -677,7 +734,7 @@ const App: React.FC = () => {
   );
 
   const renderAnalyzing = () => (
-    <div className="flex flex-col items-center justify-center min-h-[50vh] space-y-6">
+    <div className="flex flex-col items-center justify-center min-h-[50vh] space-y-6 p-4">
       <div className="relative w-full max-w-sm aspect-video rounded-2xl overflow-hidden shadow-lg border-2 border-indigo-100">
         {tempPhoto && (
           <img src={tempPhoto} alt="Parking" className="w-full h-full object-cover opacity-50" />
@@ -692,9 +749,37 @@ const App: React.FC = () => {
           </div>
         </div>
       </div>
-      <div className="text-center">
-        <h3 className="text-xl font-bold text-gray-800 mb-2">正在分析图片...</h3>
-        <p className="text-gray-500 text-sm max-w-xs">Gemini AI 正在识别楼层和车位号。</p>
+      <div className="text-center w-full max-w-xs">
+        <h3 className="text-xl font-bold text-gray-800 mb-2">{analyzingStatus}</h3>
+        <p className="text-gray-500 text-sm mb-6">Gemini AI 正在识别楼层和车位号。</p>
+        
+        {/* Debug Logs Display */}
+        <div className="bg-gray-100 p-2 rounded text-[10px] text-gray-500 font-mono h-24 overflow-y-auto text-left mb-4">
+          {debugLogs.map((log, i) => (
+            <div key={i} className="border-b border-gray-200 last:border-0 py-0.5">{log}</div>
+          ))}
+          {debugLogs.length === 0 && <span className="opacity-50">等待日志...</span>}
+        </div>
+
+        <Button 
+          variant="secondary" 
+          onClick={() => {
+            if (tempRecord && tempPhoto) {
+               // Skip analysis and save directly
+               const newRecord: ParkingLocation = {
+                ...tempRecord,
+                photoBase64: tempPhoto,
+                locationName: tempRecord.locationName || "停车位置"
+              };
+              const newList = addOrUpdateParkingRecord(newRecord);
+              setParkingList(newList);
+              activateRecord(newRecord);
+            }
+          }}
+          className="w-full"
+        >
+          跳过分析，直接保存
+        </Button>
       </div>
     </div>
   );
