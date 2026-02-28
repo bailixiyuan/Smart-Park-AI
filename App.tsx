@@ -20,6 +20,7 @@ const App: React.FC = () => {
   const [tempRecord, setTempRecord] = useState<ParkingLocation | null>(null);
   const [tempPhoto, setTempPhoto] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [locatingStatus, setLocatingStatus] = useState<string>("正在初始化定位..."); // New state for status feedback
   
   // Detail View Specific State (Timer, Edit Mode)
   const [elapsedTime, setElapsedTime] = useState<string>("0分");
@@ -216,31 +217,62 @@ const App: React.FC = () => {
     };
 
     try {
-      let position: GeolocationPosition;
+      let position: GeolocationPosition | null = null;
 
+      // Stage 1: Fast / Cached Attempt (3s timeout)
+      // Try to get a recent cached position or quick network location
       try {
-        // Attempt 1: High Accuracy (GPS preferred)
-        // Increased timeout to 8s to allow for cold GPS start
-        position = await getPosition({ 
-          enableHighAccuracy: true, 
-          timeout: 8000, 
-          maximumAge: 0 
-        });
-      } catch (e) {
-        if (!isLocatingRef.current) return; 
-        console.warn("High accuracy positioning failed, falling back to low accuracy...", e);
-        
-        // Attempt 2: Low Accuracy (Network/Wifi preferred)
-        // Increased timeout to 15s
+        setLocatingStatus("正在尝试快速定位...");
         position = await getPosition({ 
           enableHighAccuracy: false, 
-          timeout: 15000, 
-          maximumAge: 30000 
+          timeout: 3000, 
+          maximumAge: 60000 // Accept positions up to 1 min old
         });
+      } catch (e) {
+        if (!isLocatingRef.current) return;
+        console.log("Fast location failed, trying high accuracy...", e);
+      }
+
+      // Stage 2: High Accuracy Attempt (5s timeout)
+      // If fast attempt failed, try GPS for better precision
+      if (!position && isLocatingRef.current) {
+        try {
+          setLocatingStatus("正在尝试 GPS 精确定位...");
+          position = await getPosition({ 
+            enableHighAccuracy: true, 
+            timeout: 5000, 
+            maximumAge: 0 
+          });
+        } catch (e) {
+          if (!isLocatingRef.current) return;
+          console.warn("High accuracy positioning failed, falling back to network...", e);
+        }
+      }
+
+      // Stage 3: Final Fallback (10s timeout)
+      // If GPS failed, try fresh network location with longer timeout
+      if (!position && isLocatingRef.current) {
+        try {
+          setLocatingStatus("GPS 信号弱，正在尝试网络定位...");
+          position = await getPosition({ 
+            enableHighAccuracy: false, 
+            timeout: 10000, 
+            maximumAge: 0 
+          });
+        } catch (e) {
+          if (!isLocatingRef.current) return;
+          console.warn("Network positioning failed", e);
+          throw e; // Re-throw to be caught by outer catch block
+        }
       }
 
       if (!isLocatingRef.current) return;
       isLocatingRef.current = false;
+
+      // Ensure we have a position before proceeding
+      if (!position) {
+        throw new Error("Unable to retrieve location.");
+      }
 
       const coords: GeoLocation = {
         latitude: position.coords.latitude,
@@ -272,8 +304,8 @@ const App: React.FC = () => {
         msg = "定位权限被拒绝。请在系统设置中允许浏览器访问位置信息，或刷新页面重试。";
       } else if (error.code === 2) {
         msg = "位置信息不可用。请检查 GPS/定位服务是否开启。";
-      } else if (error.code === 3) {
-        msg = "获取位置超时。信号较弱，请尝试移至开阔地带。";
+      } else if (error.code === 3 || error.message?.includes("timeout")) {
+        msg = "获取位置超时。信号较弱，请尝试移至开阔地带或手动输入。";
       } else {
         msg = `定位出错 (${error.message || '未知错误'})。`;
       }
@@ -625,7 +657,7 @@ const App: React.FC = () => {
         <>
           <Loader2 className="w-12 h-12 text-indigo-600 animate-spin" />
           <div>
-             <p className="text-lg font-medium text-gray-700">正在获取 GPS 信号...</p>
+             <p className="text-lg font-medium text-gray-700">{locatingStatus}</p>
              <p className="text-sm text-gray-400 mt-1">为了提高准确度，请保持静止</p>
           </div>
           
