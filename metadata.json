@@ -1,0 +1,8 @@
+{
+  "name": "Smart Park AI",
+  "description": "再也不用担心找不到车了。记录您的停车位置，并使用 Gemini AI 分析停车位照片中的楼层和车位号。",
+  "requestFramePermissions": [
+    "camera",
+    "geolocation"
+  ]
+}
