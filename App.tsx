@@ -195,7 +195,23 @@ const App: React.FC = () => {
     // Helper function to wrap callback-based geolocation API in a Promise
     const getPosition = (options: PositionOptions): Promise<GeolocationPosition> => {
       return new Promise((resolve, reject) => {
-        navigator.geolocation.getCurrentPosition(resolve, reject, options);
+        // Safety timeout race: Some mobile browsers hang indefinitely despite options.timeout
+        const safetyTimeout = (options.timeout || 10000) + 2000;
+        const timerId = setTimeout(() => {
+          reject(new Error("Geolocation safety timeout"));
+        }, safetyTimeout);
+
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            clearTimeout(timerId);
+            resolve(pos);
+          }, 
+          (err) => {
+            clearTimeout(timerId);
+            reject(err);
+          }, 
+          options
+        );
       });
     };
 
@@ -204,21 +220,21 @@ const App: React.FC = () => {
 
       try {
         // Attempt 1: High Accuracy (GPS preferred)
-        // Shorter timeout (5s) to fail fast if GPS isn't locking
+        // Increased timeout to 8s to allow for cold GPS start
         position = await getPosition({ 
           enableHighAccuracy: true, 
-          timeout: 5000, 
+          timeout: 8000, 
           maximumAge: 0 
         });
       } catch (e) {
         if (!isLocatingRef.current) return; 
         console.warn("High accuracy positioning failed, falling back to low accuracy...", e);
         
-        // Attempt 2: Low Accuracy (Network/Wifi preferred) - Better for indoors/mobile web
-        // Longer timeout (10s) and accept cached position up to 30s
+        // Attempt 2: Low Accuracy (Network/Wifi preferred)
+        // Increased timeout to 15s
         position = await getPosition({ 
           enableHighAccuracy: false, 
-          timeout: 10000, 
+          timeout: 15000, 
           maximumAge: 30000 
         });
       }
