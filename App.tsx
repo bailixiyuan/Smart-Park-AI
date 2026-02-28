@@ -20,8 +20,9 @@ const App: React.FC = () => {
   const [tempRecord, setTempRecord] = useState<ParkingLocation | null>(null);
   const [tempPhoto, setTempPhoto] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [locatingStatus, setLocatingStatus] = useState<string>("正在初始化定位..."); // New state for status feedback
-  
+  const [locatingStatus, setLocatingStatus] = useState<string>("正在初始化定位...");
+  const [debugLogs, setDebugLogs] = useState<string[]>([]); // Added state for debug logs
+
   // Detail View Specific State (Timer, Edit Mode)
   const [elapsedTime, setElapsedTime] = useState<string>("0分");
   const [remainingTime, setRemainingTime] = useState<string | null>(null);
@@ -41,6 +42,12 @@ const App: React.FC = () => {
   const editFileInputRef = useRef<HTMLInputElement>(null);
   const notificationSentRef = useRef<Set<string>>(new Set()); // Track notifications per record ID
   const isLocatingRef = useRef(false);
+
+  // --- Helpers ---
+  const addDebugLog = (msg: string) => {
+    console.log(msg);
+    setDebugLogs(prev => [...prev.slice(-4), `${new Date().toLocaleTimeString()} - ${msg}`]);
+  };
 
   // --- Initialization ---
 
@@ -196,10 +203,9 @@ const App: React.FC = () => {
     // Helper function to wrap callback-based geolocation API in a Promise
     const getPosition = (options: PositionOptions): Promise<GeolocationPosition> => {
       return new Promise((resolve, reject) => {
-        // Safety timeout race: Some mobile browsers hang indefinitely despite options.timeout
-        const safetyTimeout = (options.timeout || 10000) + 2000;
+        const safetyTimeout = (options.timeout || 10000) + 1000;
         const timerId = setTimeout(() => {
-          reject(new Error("Geolocation safety timeout"));
+          reject(new Error(`Timeout (${safetyTimeout}ms)`));
         }, safetyTimeout);
 
         navigator.geolocation.getCurrentPosition(
@@ -217,61 +223,47 @@ const App: React.FC = () => {
     };
 
     try {
+      setDebugLogs([]);
+      addDebugLog("开始定位流程...");
+      
+      // Global Watchdog: Force fail after 12 seconds total
+      const watchdogId = setTimeout(() => {
+        if (isLocatingRef.current) {
+          addDebugLog("全局看门狗超时触发");
+          isLocatingRef.current = false;
+          setErrorMsg("定位请求长时间无响应，请尝试手动输入。");
+        }
+      }, 12000);
+
       let position: GeolocationPosition | null = null;
 
-      // Stage 1: Fast / Cached Attempt (3s timeout)
-      // Try to get a recent cached position or quick network location
+      // Strategy: Single robust attempt using Low Accuracy (Network/WiFi)
+      // This is much faster and reliable on mobile web than High Accuracy (GPS)
       try {
-        setLocatingStatus("正在尝试快速定位...");
+        setLocatingStatus("正在获取位置 (网络/基站)...");
+        addDebugLog("请求: Low Accuracy, Timeout 8s");
+        
         position = await getPosition({ 
           enableHighAccuracy: false, 
-          timeout: 3000, 
-          maximumAge: 60000 // Accept positions up to 1 min old
+          timeout: 8000, 
+          maximumAge: 30000 
         });
-      } catch (e) {
-        if (!isLocatingRef.current) return;
-        console.log("Fast location failed, trying high accuracy...", e);
+        
+        addDebugLog("定位成功!");
+      } catch (e: any) {
+        addDebugLog(`定位失败: ${e.message || e.code}`);
+        // If low accuracy fails, it's unlikely high accuracy will work quickly.
+        // We fall through to error handling.
       }
 
-      // Stage 2: High Accuracy Attempt (5s timeout)
-      // If fast attempt failed, try GPS for better precision
-      if (!position && isLocatingRef.current) {
-        try {
-          setLocatingStatus("正在尝试 GPS 精确定位...");
-          position = await getPosition({ 
-            enableHighAccuracy: true, 
-            timeout: 5000, 
-            maximumAge: 0 
-          });
-        } catch (e) {
-          if (!isLocatingRef.current) return;
-          console.warn("High accuracy positioning failed, falling back to network...", e);
-        }
-      }
-
-      // Stage 3: Final Fallback (10s timeout)
-      // If GPS failed, try fresh network location with longer timeout
-      if (!position && isLocatingRef.current) {
-        try {
-          setLocatingStatus("GPS 信号弱，正在尝试网络定位...");
-          position = await getPosition({ 
-            enableHighAccuracy: false, 
-            timeout: 10000, 
-            maximumAge: 0 
-          });
-        } catch (e) {
-          if (!isLocatingRef.current) return;
-          console.warn("Network positioning failed", e);
-          throw e; // Re-throw to be caught by outer catch block
-        }
-      }
+      clearTimeout(watchdogId);
 
       if (!isLocatingRef.current) return;
       isLocatingRef.current = false;
 
       // Ensure we have a position before proceeding
       if (!position) {
-        throw new Error("Unable to retrieve location.");
+        throw new Error("无法获取位置信息");
       }
 
       const coords: GeoLocation = {
@@ -301,16 +293,16 @@ const App: React.FC = () => {
       let msg = "定位失败";
       // GeolocationPositionError codes: 1 = PERMISSION_DENIED, 2 = POSITION_UNAVAILABLE, 3 = TIMEOUT
       if (error.code === 1) {
-        msg = "定位权限被拒绝。请在系统设置中允许浏览器访问位置信息，或刷新页面重试。";
+        msg = "定位权限被拒绝。请在系统设置中允许浏览器访问位置信息。";
       } else if (error.code === 2) {
-        msg = "位置信息不可用。请检查 GPS/定位服务是否开启。";
-      } else if (error.code === 3 || error.message?.includes("timeout")) {
-        msg = "获取位置超时。信号较弱，请尝试移至开阔地带或手动输入。";
+        msg = "位置信息不可用。请检查 GPS 开关。";
+      } else if (error.code === 3 || error.message?.includes("Timeout")) {
+        msg = "获取位置超时。信号较弱。";
       } else {
-        msg = `定位出错 (${error.message || '未知错误'})。`;
+        msg = `定位出错: ${error.message || '未知'}`;
       }
 
-      console.warn("Geolocation error", error);
+      addDebugLog(`Error: ${msg}`);
       setErrorMsg(msg);
     }
   };
@@ -668,6 +660,17 @@ const App: React.FC = () => {
           >
             跳过，手动输入
           </Button>
+          
+          {/* Debug Logs Display */}
+          <div className="mt-8 w-full max-w-xs text-left">
+            <p className="text-xs text-gray-400 mb-1 font-mono">DEBUG INFO:</p>
+            <div className="bg-gray-100 p-2 rounded text-[10px] text-gray-500 font-mono h-24 overflow-y-auto">
+              {debugLogs.map((log, i) => (
+                <div key={i} className="border-b border-gray-200 last:border-0 py-0.5">{log}</div>
+              ))}
+              {debugLogs.length === 0 && <span className="opacity-50">等待日志...</span>}
+            </div>
+          </div>
         </>
       )}
     </div>
